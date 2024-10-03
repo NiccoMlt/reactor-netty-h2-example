@@ -4,6 +4,8 @@
 //DEPS io.netty:netty-tcnative-boringssl-static:2.0.61.Final
 //DEPS org.bouncycastle:bcpkix-jdk15on:1.70
 //DEPS org.bouncycastle:bcprov-jdk15on:1.70
+//DEPS org.slf4j:slf4j-api:1.7.33
+//DEPS org.slf4j:slf4j-jdk14:1.7.33
 
 package org.diennea;
 
@@ -26,6 +28,8 @@ import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509ExtensionUtils;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Mono;
 import reactor.netty.http.HttpProtocol;
 import reactor.netty.http.server.HttpServer;
@@ -37,23 +41,29 @@ public class Main {
     private static final String[] TLS_PROTOCOLS = {"TLSv1.3", "TLSv1.2"};
     private static final String KEY_ALGORITHM = "RSA";
     private static final HttpProtocol[] HTTP_PROTOCOLS = {HttpProtocol.HTTP11, HttpProtocol.H2};
+    private static final Logger logger = LoggerFactory.getLogger(Main.class);
 
     public static void main(String[] args) throws Exception {
         final var sslContext = createSslContext();
 
-        HttpServer.create()
+        final var server = HttpServer.create()
                 .port(PORT)
                 .secure(sslContextSpec -> sslContextSpec.sslContext(sslContext))
                 .protocol(HTTP_PROTOCOLS)
-                .handle((request, response) -> response.sendString(Mono.just("Hello over HTTPS with HTTP/2!")))
-                .bindNow()
-                .onDispose()
-                .block();
+                .handle((request, response) -> response.sendString(Mono.just("Hello world!")))
+                .bindNow();
+
+        logger.info("HTTPS server is actively listening on port {}", PORT);
+        server.onDispose().block();
     }
 
     private static SslContext createSslContext() throws Exception {
         final var keyPair = generateKeyPair();
+        logger.info("Public key: {}", keyPair.getPublic());
+        logger.info("Private key: {}", keyPair.getPrivate());
+
         final var certificate = generateSelfSignedCertificate(keyPair);
+        logger.info("X509 Certificate: {}", certificate);
 
         return SslContextBuilder
                 .forServer(keyPair.getPrivate(), certificate)
@@ -77,7 +87,7 @@ public class Main {
     }
 
     private static X509Certificate generateSelfSignedCertificate(final KeyPair keyPair) throws Exception {
-        final var issuer = new X500Name("CN=" + Main.COMMON_NAME);
+        final var issuer = new X500Name("CN=" + COMMON_NAME);
         final var serial = BigInteger.valueOf(System.currentTimeMillis());
         final var now = new Date();
         final var validity = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000L); // 1 year
@@ -87,7 +97,7 @@ public class Main {
 
         final var extUtils = new JcaX509ExtensionUtils();
         final var subjectKeyIdentifier = extUtils.createSubjectKeyIdentifier(publicKey);
-        final var subjectAltName = new GeneralNames(new GeneralName(GeneralName.dNSName, Main.COMMON_NAME));
+        final var subjectAltName = new GeneralNames(new GeneralName(GeneralName.dNSName, COMMON_NAME));
         final var keyUsage = new KeyUsage(KeyUsage.digitalSignature | KeyUsage.keyEncipherment);
         certBuilder
                 .addExtension(Extension.subjectKeyIdentifier, false, subjectKeyIdentifier)
