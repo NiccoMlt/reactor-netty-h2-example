@@ -1,4 +1,4 @@
-///usr/bin/env jbang "$0" "$@" ; exit $?
+/// usr/bin/env jbang "$0" "$@" ; exit $?
 //DEPS io.projectreactor.netty:reactor-netty-core:1.1.7
 //DEPS io.projectreactor.netty:reactor-netty-http:1.1.7
 //DEPS io.netty:netty-tcnative-boringssl-static:2.0.61.Final
@@ -24,18 +24,25 @@ import io.netty.channel.socket.nio.NioChannelOption;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.ssl.ApplicationProtocolConfig;
 import io.netty.handler.ssl.ApplicationProtocolNames;
+import io.netty.handler.ssl.OpenSslCachingX509KeyManagerFactory;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.IdleStateHandler;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.math.BigInteger;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.security.KeyStore;
+import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
+import java.security.UnrecoverableKeyException;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.Date;
 import java.util.function.Function;
+import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLException;
 import jdk.net.ExtendedSocketOptions;
 import org.bouncycastle.asn1.x500.X500Name;
@@ -157,8 +164,12 @@ public class Main {
         final var certificate = generateSelfSignedCertificate(keyPair);
         LOGGER.info("X509 Certificate: {}", certificate);
 
+        final var keyStore = persistKeyStore(keyPair, certificate);
+
+        final var keyFactory = buildKeyFactory(keyStore);
+
         final var sslContextBuilder = SslContextBuilder
-                .forServer(keyPair.getPrivate(), certificate)
+                .forServer(keyFactory)
                 .sslProvider(io.netty.handler.ssl.SslProvider.OPENSSL)
                 .protocols(TLS_PROTOCOLS)
                 .enableOcsp(true)
@@ -212,6 +223,33 @@ public class Main {
             final var signer = new JcaContentSignerBuilder("SHA256withRSA").build(keyPair.getPrivate());
             return new JcaX509CertificateConverter().getCertificate(certBuilder.build(signer));
         } catch (CertificateException | NoSuchAlgorithmException | OperatorCreationException | CertIOException e) {
+            LOGGER.error(e.getMessage(), e);
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static KeyStore persistKeyStore(final KeyPair keyPair, final X509Certificate certificate) {
+        try {
+            final var keyStore = KeyStore.getInstance("JKS");
+            keyStore.load(null, null);
+            keyStore.setKeyEntry("selfsigned", keyPair.getPrivate(), "password".toCharArray(), new java.security.cert.Certificate[]{certificate});
+            try (FileOutputStream fos = new FileOutputStream("keystore.jks")) {
+                keyStore.store(fos, "password".toCharArray());
+            }
+            return keyStore;
+        } catch (NoSuchAlgorithmException | IOException | KeyStoreException | CertificateException e) {
+            LOGGER.error(e.getMessage(), e);
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static KeyManagerFactory buildKeyFactory(final KeyStore keyStore) {
+        try {
+            final var keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+            final var wrapper = new OpenSslCachingX509KeyManagerFactory(keyManagerFactory);
+            wrapper.init(keyStore, "password".toCharArray());
+            return wrapper;
+        } catch (UnrecoverableKeyException | KeyStoreException | NoSuchAlgorithmException e) {
             LOGGER.error(e.getMessage(), e);
             throw new RuntimeException(e);
         }
