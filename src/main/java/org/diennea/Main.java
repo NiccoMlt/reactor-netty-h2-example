@@ -10,16 +10,24 @@
 
 package org.diennea;
 
+import static reactor.netty.ConnectionObserver.State.CONNECTED;
+import static reactor.netty.NettyPipeline.H2OrHttp11Codec;
+import static reactor.netty.NettyPipeline.HttpTrafficHandler;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollChannelOption;
 import io.netty.channel.epoll.EpollEventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioChannelOption;
+import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.ssl.ApplicationProtocolConfig;
 import io.netty.handler.ssl.ApplicationProtocolNames;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.SslHandler;
+import io.netty.handler.timeout.IdleStateHandler;
 import java.math.BigInteger;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
@@ -56,16 +64,19 @@ public class Main {
     private static final String KEY_ALGORITHM = "RSA";
     private static final HttpProtocol[] HTTP_PROTOCOLS = {HttpProtocol.HTTP11, HttpProtocol.H2};
     private static final Logger LOGGER = LoggerFactory.getLogger(Main.class);
+    private static final Class<SslHandler> SSL_HANDLER_TYPE = io.netty.handler.ssl.SslHandler.class;
+    private static final String SSL_HANDLER_NAME = "reactor.left.sslHandler";
 
     public static void main(String[] args) {
-        final var server = buildHttpServer()
-                .handle((request, response) -> response.sendString(Mono.just("Hello world!")))
-                .bindNow();
+        final var httpServer = buildHttpServer();
+        httpServer.warmup().block();
         LOGGER.info("HTTPS server is actively listening on port {}", PORT);
-        server.onDispose().block();
+        httpServer.bindNow();
     }
 
     private static HttpServer buildHttpServer() {
+        final var epollAvailable = Epoll.isAvailable();
+        LOGGER.info("Epoll is available? {}", epollAvailable);
         return HttpServer.create()
                 .host(COMMON_NAME)
                 .port(PORT)
@@ -75,17 +86,62 @@ public class Main {
                 .forwarded((connectionInfo, httpRequest) -> /* dummy forwarded logic */ connectionInfo)
                 .option(ChannelOption.SO_BACKLOG, 128)
                 .childOption(ChannelOption.SO_KEEPALIVE, true)
-                .runOn(Epoll.isAvailable() ? new EpollEventLoopGroup() : new NioEventLoopGroup())
-                .childOption(Epoll.isAvailable()
+                .runOn(epollAvailable ? new EpollEventLoopGroup() : new NioEventLoopGroup())
+                .childOption(epollAvailable
                         ? EpollChannelOption.TCP_KEEPIDLE
                         : NioChannelOption.of(ExtendedSocketOptions.TCP_KEEPIDLE), 300)
-                .childOption(Epoll.isAvailable()
+                .childOption(epollAvailable
                         ? EpollChannelOption.TCP_KEEPINTVL
                         : NioChannelOption.of(ExtendedSocketOptions.TCP_KEEPINTERVAL), 60)
-                .childOption(Epoll.isAvailable()
+                .childOption(epollAvailable
                         ? EpollChannelOption.TCP_KEEPCNT
                         : NioChannelOption.of(ExtendedSocketOptions.TCP_KEEPCOUNT), 8)
-                .maxKeepAliveRequests(1000);
+                .maxKeepAliveRequests(1000)
+                .doOnChannelInit((observer, channel, remoteAddress) -> {
+                    // Clients Idle Timeout in seconds
+                    final var handler = new IdleStateHandler(0, 0, 120);
+                    final var pipeline = channel.pipeline();
+                    pipeline.addFirst("idleStateHandler", handler);
+
+                    // todo add OCSP stapling
+
+                    LOGGER.info("Pipeline: {}", pipeline.names());
+                    // LOGGER.info("Pipeline: {}", channel.pipeline().toString());
+                    LOGGER.info("Pipeline contains SSLHandler? {}", pipeline.get(SSL_HANDLER_TYPE) != null);
+                    LOGGER.info("Pipeline['reactor.left.sslHandler']: {}", pipeline.get(SSL_HANDLER_NAME));
+                })
+                .doOnConnection(conn -> {
+                    LOGGER.info("New connection!");
+                    conn.channel().closeFuture().addListener(e -> LOGGER.info("Connection closed!"));
+                    // config.getGroup().add(conn.channel());
+                })
+                .childObserve((connection, state) -> {
+                    final var handler = new ChannelInboundHandlerAdapter() {
+                        @Override
+                        public void channelRead(final ChannelHandlerContext ctx, final Object msg) {
+                            if (msg instanceof final HttpRequest request) {
+                                request.setUri(request.uri()
+                                        .replaceAll("\\[", "%5B")
+                                        .replaceAll("]", "%5D")
+                                );
+                            }
+                            ctx.fireChannelRead(msg);
+                        }
+                    };
+                    final var channel = connection.channel();
+                    if (state == CONNECTED) {
+                        if (channel.pipeline().get(HttpTrafficHandler) != null) {
+                            channel.pipeline().addBefore(HttpTrafficHandler, "uriEncoder", handler);
+                        }
+                        if (channel.pipeline().get(H2OrHttp11Codec) != null) {
+                            channel.pipeline().addAfter(H2OrHttp11Codec, "uriEncoder", handler);
+                        }
+                        LOGGER.debug("Unsupported pipeline structure: {}; skipping...", channel.pipeline().toString());
+                    }
+                })
+                .httpRequestDecoder(option -> option.maxHeaderSize(8192))
+                .handle((request, response) -> response.sendString(Mono.just("Hello world!")))
+                .compress(0);
     }
 
     private static void buildSslProvider(final SslProvider.SslContextSpec sslContextSpec) {
@@ -116,6 +172,7 @@ public class Main {
         try {
             return sslContextBuilder.build();
         } catch (SSLException e) {
+            LOGGER.error(e.getMessage(), e);
             throw new RuntimeException(e);
         }
     }
@@ -126,6 +183,7 @@ public class Main {
             keyPairGenerator.initialize(2048);
             return keyPairGenerator.generateKeyPair();
         } catch (final NoSuchAlgorithmException e) {
+            LOGGER.error(e.getMessage(), e);
             throw new RuntimeException(e);
         }
     }
@@ -152,6 +210,7 @@ public class Main {
             final var signer = new JcaContentSignerBuilder("SHA256withRSA").build(keyPair.getPrivate());
             return new JcaX509CertificateConverter().getCertificate(certBuilder.build(signer));
         } catch (CertificateException | NoSuchAlgorithmException | OperatorCreationException | CertIOException e) {
+            LOGGER.error(e.getMessage(), e);
             throw new RuntimeException(e);
         }
     }
