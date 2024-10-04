@@ -159,7 +159,9 @@ public class Main {
 
         final var sslContextBuilder = SslContextBuilder
                 .forServer(keyPair.getPrivate(), certificate)
+                .sslProvider(io.netty.handler.ssl.SslProvider.OPENSSL)
                 .protocols(TLS_PROTOCOLS)
+                .enableOcsp(true)
                 .applicationProtocolConfig(new ApplicationProtocolConfig(
                         ApplicationProtocolConfig.Protocol.ALPN,
                         // NO_ADVERTISE means do not send the protocol name if it's unsupported
