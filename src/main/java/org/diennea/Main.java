@@ -44,6 +44,7 @@ import java.util.Date;
 import java.util.function.Function;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLException;
+import javax.net.ssl.TrustManagerFactory;
 import jdk.net.ExtendedSocketOptions;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.Extension;
@@ -165,11 +166,12 @@ public class Main {
         LOGGER.info("X509 Certificate: {}", certificate);
 
         final var keyStore = persistKeyStore(keyPair, certificate);
-
         final var keyFactory = buildKeyFactory(keyStore);
+        final var trustManager = buildTrustManager(keyStore);
 
         final var sslContextBuilder = SslContextBuilder
                 .forServer(keyFactory)
+                .trustManager(trustManager)
                 .sslProvider(io.netty.handler.ssl.SslProvider.OPENSSL)
                 .protocols(TLS_PROTOCOLS)
                 .enableOcsp(true)
@@ -185,6 +187,17 @@ public class Main {
         try {
             return sslContextBuilder.build();
         } catch (SSLException e) {
+            LOGGER.error(e.getMessage(), e);
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static TrustManagerFactory buildTrustManager(final KeyStore keyStore) {
+        try {
+            final var trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            trustManagerFactory.init(keyStore);
+            return trustManagerFactory;
+        } catch (NoSuchAlgorithmException | KeyStoreException e) {
             LOGGER.error(e.getMessage(), e);
             throw new RuntimeException(e);
         }
