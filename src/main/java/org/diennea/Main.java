@@ -154,8 +154,13 @@ public class Main {
 
     private static void buildSslProvider(final SslProvider.SslContextSpec sslContextSpec) {
         final var sslContext = createSslContext();
-        sslContextSpec.sslContext(sslContext);
+        sslContextSpec.sslContext(sslContext)/* .setSniAsyncMappings(Main::mapSslProvider) */; // todo
     }
+
+    /* private static Future<SslProvider> mapSslProvider(final String sniHostname, final Promise<SslProvider> sslProviderPromise) {
+        // todo
+        return null;
+    } */
 
     private static SslContext createSslContext() {
         final var keyPair = generateKeyPair();
